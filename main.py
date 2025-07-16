@@ -5,6 +5,11 @@ import matplotlib.pyplot as plt
 import math
 import pandas as pd
 import csv
+from ultralytics import YOLO
+import chess
+import chess.svg
+import chess.engine
+
 
 def video_capture():
     with mss.mss() as sct:
@@ -22,7 +27,7 @@ def video_capture():
                 
     cv.destroyAllWindows()
 
-IMAGE_PATH = r'test-10.jpeg'
+IMAGE_PATH = r'test-12.png'
 
 img = cv.imread(IMAGE_PATH)
 gray_img = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
@@ -328,8 +333,8 @@ plt.imshow(img)
 plt.show()
 '''
 
-coordinates = pd.read.csv("board-sqiare-positions.csv")
-
+coordinates = pd.read_csv("board-square-positions.csv")
+coordinates.tail()
 #Dictionary for every cell's boundary coordinates
 # 64 in total
 
@@ -348,3 +353,89 @@ names: ['black-bishop', 'black-king', 'black-knight', 'black-pawn', 'black-queen
 class_dict={0:'black-bishop',1:'black-king',2:'black-knight',3:'black-pawn',4: 'black-queen',5: 'black-rook',
             6:'white-bishop',7:'white-king',8: 'white-knight',9: 'white-pawn',10: 'white-queen',11:'white-rook'}
 
+
+#Predictions
+model = YOLO('chess-model-yolov8m.pt')
+
+results = model(IMAGE_PATH)
+IM_ARRAY = results[0].plot()
+'''
+plt.imshow(IM_ARRAY)
+plt.show()
+'''
+
+
+game_list = [] # game_list is a list that contains the information about the game
+
+for result in results:
+    for id,box in enumerate(result.boxes.xyxy) :
+        x1,y1,x2,y2=int(box[0]),int(box[1]),int(box[2]),int(box[3]) # take coordinates
+        x_mid = int((x1+x2)/2)
+        y_mid=int((y1+y2)/2)+25
+
+        for cell_value, coordinates in coord_dict.items():
+            x_values = [point[0] for point in coordinates]
+            y_values = [point[1] for point in coordinates]
+
+            if (min(x_values) <= x_mid <= max(x_values)) and (min(y_values) <= y_mid <= max(y_values)):
+                a = int(result.boxes.cls[id])
+                print(f" cell :  {cell_value} --> {a} ")
+
+                game_list.append([cell_value,a])
+                break
+
+# show game , if cell value exist in game_list , then print piece in that cell , otherwise print space 
+chess_str=""
+for i in range(1, 65):
+    
+    for slist in game_list:
+        if slist[0] == i:
+            print(class_dict[slist[1]], end=" ")
+            chess_str+=f" {class_dict[slist[1]]} "
+            break
+    else:
+        print("space", end=" ")
+        chess_str+=" space "
+
+    if i % 8 == 0:
+        print("\n")
+        chess_str+="\n"
+
+STOCKFISH_PATH = r'stockfish\stockfish-windows-x86-64-avx2.exe'
+
+#game_list to FEN
+
+board = chess.Board(None)
+
+cell_to_square = {}
+files = 'abcdefgh'
+
+for i in range(64):
+    cell_to_square[i+1] = files[i % 8] + str(8-(i // 8))
+
+for cell, piece_id in game_list:
+    piece_name = class_dict[piece_id]
+    square = chess.parse_square(cell_to_square[cell])
+
+    piece_type = piece_name.split("-")[1]
+    color = chess.BLACK if piece_name.startswith("black") else chess.WHITE
+
+    piece_map = {
+        "pawn": chess.PAWN,
+        "knight": chess.KNIGHT,
+        "bishop": chess.BISHOP,
+        "rook": chess.ROOK,
+        "queen": chess.QUEEN,
+        "king": chess.KING
+    }
+
+    board.set_piece_at(square, chess.Piece(piece_map[piece_type], color))
+
+print("Current board:\n", board)
+
+engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+
+result = engine.play(board, chess.engine.Limit(time=0.1))
+print("Best move:", result.move)
+
+engine.quit()
