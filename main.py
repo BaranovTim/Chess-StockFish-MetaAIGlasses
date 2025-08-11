@@ -1,66 +1,63 @@
 import cv2 as cv
-import mss
 import numpy as np
-import matplotlib.pyplot as plt
 import math
-import pandas as pd
-import csv
+import matplotlib.pyplot as plt
 from ultralytics import YOLO
 import chess
-import chess.svg
 import chess.engine
 import time
 
-#Захват камеры
-camera = cv.VideoCapture(0, cv.CAP_DSHOW)
+INTERVAL = 10
+LAST_CAPTURE_TIME = 0
+MIN_SQUARE_LENGTH = 30
+MAX_SQUARE_LENGTH = 50
 
+MIN_BOARD_LENGTH = 240
+MAX_BOARD_LENGTH = 400
+# Class id to label mapping must match training
+CLASS_ID_TO_NAME = {
+    0: 'black-bishop', 1: 'black-king', 2: 'black-knight', 3: 'black-pawn', 4: 'black-queen', 5: 'black-rook',
+    6: 'white-bishop', 7: 'white-king', 8: 'white-knight', 9: 'white-pawn', 10: 'white-queen', 11: 'white-rook'
+}
+camera = cv.VideoCapture(0, cv.CAP_DSHOW)
 if not camera.isOpened():
-    print("No connection with camera")
+    print("Не удалось открыть камеру")
     exit()
 
-count = 0
-
-try:
-    while True:
-        ret, frame = camera.read()
-        if not ret:
-            print("Couldnt get a screenshot")
-            break
-
+def detect_chessboard(frame):    
         img = frame.copy()
-        cv.imshow('Screenshot', img)
         gray_img = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
-        rgb_img = cv.cvtColor(img, cv.COLOR_BGR2RGB)
 
-        
-        #Processing Image
-
-        #Threeshold (Each pizel will be exactly black or white)
-        #ret - выбранный порог от cv.THRESH_BINARY + cv.THRESH_OTSU
-        #otsu_binary - b&w img
-        otsu_binary = cv.adaptiveThreshold(gray_img, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 25, 10)
-
-        #Canny (edges)
-        canny_img = cv.Canny(otsu_binary, 100, 150)
+        #Detecting edges
+        canny_img = cv.Canny(gray_img, 100, 150)
+        cv.imshow('edges', canny_img)
 
         #Widering edges
-        kernel = np.ones((1,1), np.uint8)
-        dilation_img = cv.dilate(canny_img, kernel, iterations=1)
+        kernel = np.ones((2,2), np.uint8)
+        wider_img = cv.dilate(canny_img, kernel, iterations=1)
+        cv.imshow('wider img', wider_img)
 
-        plt.figure(figsize=(9,7))
-        plt.title("Test")
-        plt.imshow(dilation_img, cmap="gray")
+        threshold = 200
+        black_img_lines = np.zeros_like(wider_img)
+        lines = cv.HoughLines(wider_img, 1, np.pi / 180, threshold=threshold)
 
-        #Finding straight lines
-        # 1 - точность по ширине
-        # np.pi / 180 - точность по углу (1 градус)
-        #threshold = 500 - минимальное количество точек на линии, чтобы она считалась действительной
-        morph = cv.morphologyEx(dilation_img, cv.MORPH_CLOSE, kernel, iterations=1)
-
-        # Поиск контуров
-        contours, _ = cv.findContours(morph, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+        if lines is not None:
+            for rho, theta in lines[:, 0]:
+                a = np.cos(theta)
+                b = np.sin(theta)
+                x0 = a * rho
+                y0 = b * rho
+                x1 = int(x0 + 1000 * (-b))
+                y1 = int(y0 + 1000 * (a))
+                x2 = int(x0 - 1000 * (-b))
+                y2 = int(y0 - 1000 * (a))
+                cv.line(black_img_lines, (x1, y1), (x2, y2), (255, 255, 255), 2)
+            cv.imshow('Lines', black_img_lines)            
+            
+        
+        contours, _ = cv.findContours(black_img_lines, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
         # Отрисовка прямоугольников вместо линий
-        black_img = np.zeros_like(dilation_img)
+        black_img_squares = np.ones_like(black_img_lines)
 
         rect_count = 0  # Считаем прямоугольники
 
@@ -69,31 +66,19 @@ try:
             if area < 200 or area > 15000:
                 continue  # фильтруем слишком маленькие/большие
 
-            epsilon = 0.01 * cv.arcLength(contour, True)
+            epsilon = 0.03 * cv.arcLength(contour, True)
             approx = cv.approxPolyDP(contour, epsilon, True)
 
             if 4 <= len(approx) <= 6:
-                cv.drawContours(black_img, [approx], -1, 255, thickness=4)
+                cv.drawContours(black_img_squares, [approx], -1, 255, thickness=4)
                 rect_count += 1
+        cv.imshow('4-angled figures', black_img_squares)
 
-        print("Прямоугольников найдено:", rect_count)
-        
-        # Дополнительно чуть расширяем контуры для надёжности
-        kernel = np.ones((1, 1), np.uint8)
-        black_img_closed = cv.morphologyEx(black_img, cv.MORPH_CLOSE, kernel, iterations=1)
-        black_img_lined = cv.dilate(black_img_closed, kernel, iterations=1)
-        
-        plt.figure(figsize=(9,7))
-        plt.title("All Lines (black_image)")
-        plt.imshow(black_img_lined, cmap="gray")
-        plt.show()
-        
 
-        # Look for valid squares and check if squares are inside of board
-        #contours
-        board_contours, hierarchy = cv.findContours(black_img_lined, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
 
-        black_img_2 = np.zeros_like(black_img_lined)
+        board_contours, hierarchy = cv.findContours(black_img_squares, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+
+        black_img_2 = np.zeros_like(black_img_squares)
 
         square_centers = list()
 
@@ -101,7 +86,7 @@ try:
 
         # loop through contours and filter them by deciding if they are potential squares
         for contour in board_contours:
-            if 200 < cv.contourArea(contour) < 10000:
+            if MIN_SQUARE_LENGTH**2 < cv.contourArea(contour) < MAX_SQUARE_LENGTH**2:
 
                 # Approximate the contour to a simpler shape
                 epsilon = 0.02 * cv.arcLength(contour, True) # Типо сглаживание
@@ -172,306 +157,28 @@ try:
                         cv.line(black_img_2, pt3, pt4, 255, 7)
                         cv.line(black_img_2, pt1, pt4, 255, 7)
                         
-        plt.figure(figsize=(12,8))
 
-        plt.subplot(121)
-        plt.title("board_squared")
-        plt.imshow(board_squared,cmap="gray")
-
-        plt.subplot(122)
-        plt.title("board squared 2")
-        plt.imshow(black_img_2,cmap="gray")
-        plt.show()
+        cv.imshow(' 1 ',board_squared)
+        cv.imshow(' 2 ',black_img_2)
         
 
-        kernel = np.ones((7,7), np.uint8)
-        dilated_black_img = cv.dilate(black_img_2, kernel, iterations=1)
-
-
-        #finding the biggest contour
-        contours, _ = cv.findContours(dilated_black_img, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-
-        if not contours:
-            print('No chess board detected')
-            continue
-
-        largest_contour = max(contours, key=cv.contourArea)
-        largest_contour_img = np.zeros_like(dilated_black_img)
-
-        cv.drawContours(largest_contour_img, largest_contour, -1, (255,255,255), 10)
-        
-        plt.figure(figsize=(9,7))
-        plt.title("Biggest contour")
-        plt.imshow(largest_contour_img)
-        plt.show()
-        
-
-        inside_squares = list()
-
-        for square in square_centers:
-            point=(square[0],square[1])
-
-            #Checking if it is inside
-            distance = cv.pointPolygonTest(largest_contour, point, measureDist=False)
-
-            if distance >= 0:
-                inside_squares.append(square)
-            else:
-                continue
-
-        #print(len(inside_squares)) // 64
-
-        #sorting the squares
-
-        #sorting y
-        sorted_coordinates = sorted(inside_squares, key=lambda x: x[1], reverse=True)
-
-        #sorting x
-        groups = []
-        current_group = [sorted_coordinates[0]]
-
-        for coord in sorted_coordinates[1:]:
-            if abs(coord[1] - current_group[-1][1]) < 50:
-                current_group.append(coord)
-            else:
-                groups.append(current_group)
-                current_group = [coord]
-
-        groups.append(current_group)
-
-        for group in groups:
-            group.sort(key=lambda x: x[0])
-
-        sorted_coordinates = [coord for group in groups for coord in group]
 
 
 
-
-        def fill_gaps():
-            global sorted_coordinates
-            
-            addition = 0
-
-            for num in range(63):
-
-                if num in[6,14,22,30,38,46,54]:
-                    if abs(sorted_coordinates[num][0]-sorted_coordinates[num+1][0])>250:
-
-                        x=sorted_coordinates[num][0] + abs(sorted_coordinates[num][0]-sorted_coordinates[num-1][0])
-                        y=sorted_coordinates[num][1]
-
-                        p1 = (sorted_coordinates[num][2][0] + abs(sorted_coordinates[num][2][0]-sorted_coordinates[num-1][2][0]), sorted_coordinates[num][2][1])
-                        p2 = (sorted_coordinates[num][3][0] + abs(sorted_coordinates[num][3][0]-sorted_coordinates[num-1][3][0]), sorted_coordinates[num][3][1])
-                        p3 = sorted_coordinates[num][3]
-                        p4 = sorted_coordinates[num][2]
-
-                        sorted_coordinates.insert(num+1, [x,y,p1,p2,p3,p4])
-                        print('first statement', num+2)
-                        continue
-
-                elif num in [8,16,24,32,40,48,56]:
-                    if abs(sorted_coordinates[num][0]-sorted_coordinates[num-8][0])>50:
-
-                        x=sorted_coordinates[num-8][0] 
-                        y=sorted_coordinates[num+1][1] 
-                            
-                        p1=sorted_coordinates[num-8][3]
-                        p2=(sorted_coordinates[num-8][3][0],sorted_coordinates[num+1][3][1])
-                        p3=(sorted_coordinates[num-8][4][0],sorted_coordinates[num+1][3][1])
-                        p4=sorted_coordinates[num-8][4]
-                        
-                        sorted_coordinates.insert(num,[x,y,p1,p2,p3,p4])
-                        print("second statement",num+1)
-                        continue
-
-                elif abs(sorted_coordinates[num][1] - sorted_coordinates[num+1][1])< 50 :
-                    if sorted_coordinates[num+1][0] - sorted_coordinates[num][0] > 150:
-                        x=(sorted_coordinates[num+1][0] + sorted_coordinates[num][0])/2
-                        y=(sorted_coordinates[num+1][1] + sorted_coordinates[num][1])/2
-                        p1=sorted_coordinates[num+1][5]
-                        p2=sorted_coordinates[num+1][4]
-                        p3=sorted_coordinates[num][3]
-                        p4=sorted_coordinates[num][2]
-                        sorted_coordinates.insert(num+1,[x,y,p1,p2,p3,p4])
-                        print(f"third statement",num+2)
-                        addition+=1
-
-            if addition!=0:
-                fill_gaps()
-
-
-        if len(inside_squares)!=64:            
-            fill_gaps() 
-
-
-        image = frame.copy()
-        corners_image=cv.cvtColor(image,cv.COLOR_BGR2RGB)
-
-
-        p1=sorted_coordinates[0][5]
-        p2=sorted_coordinates[7][2]
-        p3=sorted_coordinates[56][4]
-        p4=sorted_coordinates[63][3]
-
-        cv.circle(corners_image, (int(p1[0]),int(p1[1])), 12, (0,255,0), 8)
-        cv.circle(corners_image, (int(p2[0]),int(p2[1])), 12, (0,255,0), 8)
-        cv.circle(corners_image, (int(p3[0]),int(p3[1])), 12, (0,255,0), 8)
-        cv.circle(corners_image, (int(p4[0]),int(p4[1])), 12, (0,255,0), 8)
-
-        
-        plt.figure(figsize=(9,7))
-        plt.imshow(corners_image)
-        plt.show()
-        
-        #Coordinates to CSV file
-
-        with open("board-square-positions.csv", mode='w', newline='')as file:
-            writer = csv.writer(file)
-
-            writer.writerow(['x1', 'y1', 'x2', 'y2', 'x3', 'y3', 'x4', 'y4'])
-
-            for coordinate in sorted_coordinates:
-                writer.writerow([coordinate[2][0], coordinate[2][1],
-                                coordinate[3][0], coordinate[3][1],
-                                coordinate[4][0], coordinate[4][1],
-                                coordinate[5][0], coordinate[5][1]])
-
-        data = pd.read_csv("board-square-positions.csv")
-        img = frame.copy()
-
-        for i, row in data.iterrows():
-            pts = []
-            for j in range(0, 8, 2):
-                pts.append((int(row[j]), int(row[j+1])))
-            pts = np.array(pts, np.int32)
-            pts = pts.reshape((-1,1,2))
-            cv.circle(img, (int(sorted_coordinates[i][0]),int(sorted_coordinates[i][1])), 3, (0,255,0), 3)
-            cv.polylines(img,[pts],True,(255,255,255),thickness=8)
-
-        
-        plt.figure(figsize=(10,8))
-        plt.imshow(img)
-        plt.show()
-        
-
-        coordinates = pd.read_csv("board-square-positions.csv")
-        #Dictionary for every cell's boundary coordinates
-        # 64 in total
-
-        coord_dict = {}
-
-        cell=1
-        for row in coordinates.values:
-            coord_dict[cell]=[[row[0], row[1]], [row[2],row[3]],[row[4],row[5]], [row[6],row[7]]]
-            cell+=1
-
-        print(coord_dict[1])
-        print(len(coord_dict))
-
-        # class values , these values are decided before training
-        names: ['black-bishop', 'black-king', 'black-knight', 'black-pawn', 'black-queen', 'black-rook', 'white-bishop', 'white-king', 'white-knight', 'white-pawn', 'white-queen', 'white-rook'] # type: ignore
-        class_dict={0:'black-bishop',1:'black-king',2:'black-knight',3:'black-pawn',4: 'black-queen',5: 'black-rook',
-                    6:'white-bishop',7:'white-king',8: 'white-knight',9: 'white-pawn',10: 'white-queen',11:'white-rook'}
-
-
-        #Predictions
-        model = YOLO('chess-model-yolov8m.pt')
+while True:
+    ret, frame = camera.read()
+    if not ret:
+        print("Не удалось считать кадр")
+        break
     
+    now = time.time()
+    if now - LAST_CAPTURE_TIME >= INTERVAL:
+        cv.imshow('Screenshot',frame)
+        detect_chessboard(frame)
+        LAST_CAPTURE_TIME = now
 
-        # Обнаружение объектов на кадре
-        results = model(frame, stream=True)
-    
-        game_list = [] # game_list is a list that contains the information about the game
+    if cv.waitKey(1) & 0xFF == ord('q'):
+        break
 
-        for result in results:
-            boxes = result.boxes
-            for box in boxes:
-                x1,y1,x2,y2=map(int, box.xyxy[0].cpu().numpy())
-                x_mid = int(box.cls[0].cpu().numpy())
-                y_mid=float(box.conf[0].cpu().numpy())
-
-                for cell_value, coordinates in coord_dict.items():
-                    x_values = [point[0] for point in coordinates]
-                    y_values = [point[1] for point in coordinates]
-
-                    if (min(x_values) <= x_mid <= max(x_values)) and (min(y_values) <= y_mid <= max(y_values)):
-                        a = int(result.boxes.cls[id])
-                        print(f" cell :  {cell_value} --> {a} ")
-
-                        game_list.append([cell_value,a])
-                        break
-                    cls_id = int(box.cls[0])
-                    confidence = float(box.conf[0])
-
-                    # Название класса
-                    label = model.names[cls_id]
-                    text = f"{label} {confidence:.2f}"
-
-                    # Отображение прямоугольника и текста
-                    cv.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                    cv.putText(frame, text, (x1, y1 - 5), cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-        # show game , if cell value exist in game_list , then print piece in that cell , otherwise print space 
-        chess_str=""
-        for i in range(1, 65):
-            
-            for slist in game_list:
-                if slist[0] == i:
-                    print(class_dict[slist[1]], end=" ")
-                    chess_str+=f" {class_dict[slist[1]]} "
-                    break
-            else:
-                print("space", end=" ")
-                chess_str+=" space "
-
-            if i % 8 == 0:
-                print("\n")
-                chess_str+="\n"
-
-        STOCKFISH_PATH = r'stockfish\stockfish-windows-x86-64-avx2.exe'
-
-        #game_list to FEN
-
-        board = chess.Board(None)
-
-        cell_to_square = {}
-        files = 'abcdefgh'
-
-        for i in range(64):
-            cell_to_square[i+1] = files[i % 8] + str(8-(i // 8))
-
-        for cell, piece_id in game_list:
-            piece_name = class_dict[piece_id]
-            square = chess.parse_square(cell_to_square[cell])
-
-            piece_type = piece_name.split("-")[1]
-            color = chess.BLACK if piece_name.startswith("black") else chess.WHITE
-
-            piece_map = {
-                "pawn": chess.PAWN,
-                "knight": chess.KNIGHT,
-                "bishop": chess.BISHOP,
-                "rook": chess.ROOK,
-                "queen": chess.QUEEN,
-                "king": chess.KING
-            }
-
-            board.set_piece_at(square, chess.Piece(piece_map[piece_type], color))
-
-        print("Current board:\n", board)
-
-        engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-
-        result = engine.play(board, chess.engine.Limit(time=0.1))
-        print("Best move:", result.move)
-
-        engine.quit()
-
-
-        count += 1
-        time.sleep(3)
-except KeyboardInterrupt:
-    print("Остановлено вручную")
-
-finally:
-    camera.release()
-    cv.destroyAllWindows()
+camera.release()
+cv.destroyAllWindows()
