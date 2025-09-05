@@ -23,13 +23,6 @@ CLASS_ID_TO_NAME = {
     6: 'white-bishop', 7: 'white-king', 8: 'white-knight', 9: 'white-pawn', 10: 'white-queen', 11: 'white-rook'
 }
 
-# Load YOLO model
-try:
-    model = YOLO('chess-model-yolov8m.pt')
-    print("YOLO model loaded successfully")
-except Exception as e:
-    print(f"Error loading YOLO model: {e}")
-    model = None
 
 camera = cv.VideoCapture(0, cv.CAP_DSHOW)
 if not camera.isOpened():
@@ -159,7 +152,6 @@ def detect_chessboard(frame):
             mid_x = sum_x / 4
             mid_y = sum_y / 4
             mid_squares.append((mid_x, mid_y))
-
 
         #finding the biggest contour 
         contours, _ = cv.findContours(wider_img, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
